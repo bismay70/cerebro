@@ -1,0 +1,631 @@
+from datetime import UTC, datetime
+from enum import Enum
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy.orm import declarative_base, relationship
+
+Base = declarative_base()
+
+
+class TaskStatus(str, Enum):
+    OPEN = "open"
+    ACKED = "acked"
+    BLOCKED = "blocked"
+    DONE = "done"
+    CANCELLED = "cancelled"
+
+
+class LadderStatus(str, Enum):
+    ACTIVE = "active"
+    ACKED = "acked"
+    CANCELLED = "cancelled"
+    EXHAUSTED = "exhausted"
+
+
+class MeetingStatus(str, Enum):
+    SCHEDULED = "scheduled"
+    CANCELLED = "cancelled"
+
+
+class RSVPStatus(str, Enum):
+    PENDING = "pending"
+    YES = "yes"
+    NO = "no"
+
+
+class ReminderStage(str, Enum):
+    NONE = "none"
+    T_MINUS_24H = "t_minus_24h"
+    T_MINUS_60M = "t_minus_60m"
+    T_MINUS_10M = "t_minus_10m"
+
+
+class PolicyAction(str, Enum):
+    ALLOW = "allow"
+    REDACT = "redact"
+    DENY = "deny"
+
+
+class CrossingStatus(str, Enum):
+    RECORDED = "recorded"
+    SENT = "sent"
+    DENIED = "denied"
+
+
+class Population(str, Enum):
+    CLIENT = "client"
+    OPS = "ops"
+    DEV = "dev"
+    LEAD = "lead"
+    ADMIN = "admin"
+
+
+class OrderStatus(str, Enum):
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    COMPLETE = "complete"
+    CANCELLED = "cancelled"
+
+
+class GapChaseStatus(str, Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    EXHAUSTED = "exhausted"
+
+
+class NudgeKind(str, Enum):
+    GAP_ASK = "gap_ask"
+    GAP_ESCALATE = "gap_escalate"
+    TASK_CARD = "task_card"
+    TASK_LADDER = "task_ladder"
+    TASK_BLOCKED = "task_blocked"
+    MEETING_REMINDER = "meeting_reminder"
+    MEETING_CANCELLED = "meeting_cancelled"
+    SUMMARY_REQUEST = "summary_request"
+    SUMMARY_CHASE = "summary_chase"
+    CLIENT_FEEDBACK = "client_feedback"
+    INCIDENT_UPDATE = "incident_update"
+    ROLE_CLAIM_PENDING = "role_claim_pending"
+    ROLE_CLAIM_RESOLVED = "role_claim_resolved"
+    DEADLINE_REQUESTED = "deadline_requested"
+    REMINDER_DUE = "reminder_due"
+
+
+class ReminderKind(str, Enum):
+    GENERAL = "general"
+    DEADLINE = "deadline"
+
+
+class ReminderStatus(str, Enum):
+    PENDING = "pending"
+    FIRED = "fired"
+    CANCELLED = "cancelled"
+
+
+class NudgeStatus(str, Enum):
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
+
+
+class ApprovalState(str, Enum):
+    PENDING = "pending"
+    CONFIRMED = "confirmed"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+class RoleClaimStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    DENIED = "denied"
+    EXPIRED = "expired"
+
+
+class MessageRole(str, Enum):
+    USER = "user"
+    ASSISTANT = "assistant"
+
+
+class Org(Base):
+    __tablename__ = "orgs"
+
+    id = Column(String, primary_key=True)
+    name = Column(String, nullable=False)
+    # Short, unique, human-typeable code an unknown sender answers with
+    # during onboarding to be routed into this org rather than a single
+    # hardcoded default (see ingress/enrollment.py, services/orgs.py).
+    join_code = Column(String, nullable=False, unique=True)
+    admin_contact = Column(String)
+    billing_tier = Column(String)
+    # Danger Zone flags (Settings page). Persisted, real, admin-token-gated
+    # mutations — but nothing else in this codebase reads them yet to
+    # actually disconnect a channel or deactivate an integration (the
+    # caspian-sdk channel gateway is a separate process with no knowledge
+    # of this column). See migration 0016 for the full note.
+    channels_active = Column(Boolean, nullable=False, default=True)
+    workspace_active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    principals = relationship("Principal", back_populates="org")
+    orders = relationship("Order", back_populates="org")
+
+
+class Principal(Base):
+    __tablename__ = "principals"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    population = Column(SQLEnum(Population), nullable=False)
+    email = Column(String)
+    display_name = Column(String)
+    skills_json = Column(String, nullable=False, default="[]")
+    wip_cap = Column(Integer, nullable=False, default=3)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    org = relationship("Org", back_populates="principals")
+    bindings = relationship("ChannelBinding", back_populates="principal")
+    orders = relationship("Order", back_populates="principal")
+
+    __table_args__ = (
+        Index("ix_principals_org_id", "org_id"),
+        Index("ix_principals_population", "population"),
+    )
+
+
+class ChannelBinding(Base):
+    __tablename__ = "channel_bindings"
+
+    id = Column(String, primary_key=True)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    channel = Column(String, nullable=False)
+    channel_id = Column(String, nullable=False)
+    conversation_id = Column(String)
+    verified = Column(String, default="pending")
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    principal = relationship("Principal", back_populates="bindings")
+
+    __table_args__ = (
+        Index("ix_channel_bindings_principal_id", "principal_id"),
+        Index("ix_channel_bindings_channel_channel_id", "channel", "channel_id"),
+    )
+
+
+class Order(Base):
+    __tablename__ = "orders"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    order_type = Column(String, nullable=False)
+    status = Column(String, nullable=False, default=OrderStatus.OPEN.value)
+    free_text = Column(String)
+    fields_json = Column(String, nullable=False, default="{}")
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    org = relationship("Org", back_populates="orders")
+    principal = relationship("Principal", back_populates="orders")
+    gap_chases = relationship("GapChase", back_populates="order")
+
+    __table_args__ = (
+        Index("ix_orders_org_id", "org_id"),
+        Index("ix_orders_principal_id", "principal_id"),
+        Index("ix_orders_order_type", "order_type"),
+        Index("ix_orders_status", "status"),
+    )
+
+
+class FieldSpec(Base):
+    __tablename__ = "field_specs"
+
+    id = Column(String, primary_key=True)
+    order_type = Column(String, nullable=False)
+    field_name = Column(String, nullable=False)
+    required = Column(Boolean, nullable=False, default=True)
+    validator = Column(String, nullable=False, default="nonempty")
+
+    __table_args__ = (Index("ix_field_specs_order_type", "order_type"),)
+
+
+class GapChase(Base):
+    __tablename__ = "gap_chases"
+
+    id = Column(String, primary_key=True)
+    order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    field_name = Column(String, nullable=False)
+    status = Column(String, nullable=False, default=GapChaseStatus.OPEN.value)
+    ask_count = Column(Integer, nullable=False, default=0)
+    last_asked_at = Column(DateTime)
+    next_ask_at = Column(DateTime)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    order = relationship("Order", back_populates="gap_chases")
+    nudges = relationship("Nudge", back_populates="gap_chase")
+
+    __table_args__ = (
+        Index("ix_gap_chases_order_id", "order_id"),
+        Index("ix_gap_chases_status", "status"),
+    )
+
+
+class Nudge(Base):
+    __tablename__ = "nudges"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    order_id = Column(String, ForeignKey("orders.id"))
+    gap_chase_id = Column(String, ForeignKey("gap_chases.id"))
+    kind = Column(String, nullable=False)
+    body = Column(String, nullable=False)
+    status = Column(String, nullable=False, default=NudgeStatus.PENDING.value)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    sent_at = Column(DateTime)
+
+    gap_chase = relationship("GapChase", back_populates="nudges")
+
+    __table_args__ = (
+        Index("ix_nudges_org_id", "org_id"),
+        Index("ix_nudges_principal_id", "principal_id"),
+        Index("ix_nudges_order_id", "order_id"),
+        Index("ix_nudges_status", "status"),
+        Index("ix_nudges_kind", "kind"),
+    )
+
+
+class Task(Base):
+    __tablename__ = "tasks"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    order_id = Column(String, ForeignKey("orders.id"))
+    number = Column(Integer, nullable=False)
+    title = Column(String, nullable=False)
+    description = Column(String)
+    designation = Column(String, nullable=False)
+    required_skills_json = Column(String, nullable=False, default="[]")
+    status = Column(String, nullable=False, default=TaskStatus.OPEN.value)
+    assignee_principal_id = Column(String, ForeignKey("principals.id"))
+    blocked_reason = Column(String)
+    ladder_rung = Column(Integer, nullable=False, default=0)
+    ladder_status = Column(String, nullable=False, default=LadderStatus.ACTIVE.value)
+    ladder_last_fired_at = Column(DateTime)
+    ladder_next_due_at = Column(DateTime)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    acked_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_tasks_org_id", "org_id"),
+        Index("ix_tasks_order_id", "order_id"),
+        Index("ix_tasks_status", "status"),
+        Index("ix_tasks_assignee_principal_id", "assignee_principal_id"),
+        Index("ix_tasks_org_id_number", "org_id", "number", unique=True),
+    )
+
+
+class Meeting(Base):
+    __tablename__ = "meetings"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    organizer_principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    title = Column(String, nullable=False)
+    starts_at = Column(DateTime, nullable=False)
+    duration_minutes = Column(Integer, nullable=False, default=30)
+    status = Column(String, nullable=False, default=MeetingStatus.SCHEDULED.value)
+    provider = Column(String, nullable=False, default="")
+    join_url = Column(String)
+    external_event_id = Column(String)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    attendees = relationship("MeetingAttendee", back_populates="meeting")
+
+    __table_args__ = (
+        Index("ix_meetings_org_id", "org_id"),
+        Index("ix_meetings_starts_at", "starts_at"),
+        Index("ix_meetings_status", "status"),
+    )
+
+
+class MeetingAttendee(Base):
+    __tablename__ = "meeting_attendees"
+
+    id = Column(String, primary_key=True)
+    meeting_id = Column(String, ForeignKey("meetings.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    rsvp_status = Column(String, nullable=False, default=RSVPStatus.PENDING.value)
+    reminder_stage = Column(String, nullable=False, default=ReminderStage.NONE.value)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    meeting = relationship("Meeting", back_populates="attendees")
+
+    __table_args__ = (
+        Index("ix_meeting_attendees_meeting_id", "meeting_id"),
+        Index("ix_meeting_attendees_principal_id", "principal_id"),
+        Index(
+            "ix_meeting_attendees_meeting_id_principal_id",
+            "meeting_id",
+            "principal_id",
+            unique=True,
+        ),
+    )
+
+
+class SummaryEntry(Base):
+    __tablename__ = "summary_entries"
+
+    id = Column(String, primary_key=True)
+    order_id = Column(String, ForeignKey("orders.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    text = Column(String, nullable=False)
+    submitted_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index("ix_summary_entries_order_id", "order_id"),
+        Index("ix_summary_entries_principal_id", "principal_id"),
+    )
+
+
+class Message(Base):
+    """Persisted conversation ledger: one row per user/assistant turn."""
+
+    __tablename__ = "messages"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    channel = Column(String, nullable=False)
+    # Population snapshotted at send time (not re-joined from principals),
+    # so history reads stay correct even if a principal's population changes later.
+    population = Column(String, nullable=False)
+    role = Column(String, nullable=False)
+    content = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index("ix_messages_principal_id_created_at", "principal_id", "created_at"),
+        Index("ix_messages_org_id", "org_id"),
+    )
+
+
+class Policy(Base):
+    """A seeded crossing rule: what happens when content moves source -> target."""
+
+    __tablename__ = "policies"
+
+    id = Column(String, primary_key=True)
+    source_population = Column(String, nullable=False)
+    target_population = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    redact_fields_json = Column(String, nullable=False, default="[]")
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_policies_source_target",
+            "source_population",
+            "target_population",
+            unique=True,
+        ),
+    )
+
+
+class Crossing(Base):
+    """Audit row for one population-boundary crossing attempt.
+
+    Written before the content is actually relayed, not after - so a crash
+    or send failure between the two still leaves an accurate audit trail.
+    """
+
+    __tablename__ = "crossings"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    source_population = Column(String, nullable=False)
+    target_population = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    content_ref = Column(String)
+    status = Column(String, nullable=False, default=CrossingStatus.RECORDED.value)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    sent_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_crossings_org_id", "org_id"),
+        Index("ix_crossings_principal_id", "principal_id"),
+        Index("ix_crossings_created_at", "created_at"),
+    )
+
+
+class PendingEnrollment(Base):
+    """An unknown sender is mid-onboarding and hasn't finished answering yet.
+
+    Two stages, tracked by `stage`: "awaiting_code" (org_id is still null —
+    the sender hasn't given a team code yet) then "awaiting_usertype" (org_id
+    is set; waiting on CLIENT/TEAM + role + email). See ingress/enrollment.py.
+    """
+
+    __tablename__ = "pending_enrollments"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=True)
+    stage = Column(String, nullable=False, default="awaiting_code")
+    channel = Column(String, nullable=False)
+    channel_id = Column(String, nullable=False)
+    conversation_id = Column(String, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "ix_pending_enrollments_channel_channel_id",
+            "channel",
+            "channel_id",
+            unique=True,
+        ),
+    )
+
+
+class Approval(Base):
+    """A pending confirmation challenge addressed by CONFIRM/DENY nonce."""
+
+    __tablename__ = "approvals"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    nonce = Column(String, nullable=False)
+    state = Column(String, nullable=False, default=ApprovalState.PENDING.value)
+    action = Column(String, nullable=False)
+    payload_json = Column(String, nullable=False, default="{}")
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    resolved_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_approvals_nonce", "nonce", unique=True),
+        Index("ix_approvals_state_expires_at", "state", "expires_at"),
+        Index("ix_approvals_org_id", "org_id"),
+        Index("ix_approvals_principal_id", "principal_id"),
+    )
+
+
+class CiRun(Base):
+    """Cached GitHub Actions workflow run (CI ledger)."""
+
+    __tablename__ = "ci_runs"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    github_run_id = Column(String, nullable=False)
+    owner = Column(String, nullable=False)
+    repo = Column(String, nullable=False)
+    workflow_name = Column(String, nullable=False, default="")
+    head_branch = Column(String, nullable=False, default="")
+    head_sha = Column(String, nullable=False, default="")
+    status = Column(String, nullable=False, default="")
+    conclusion = Column(String)
+    html_url = Column(String, nullable=False, default="")
+    event = Column(String, nullable=False, default="")
+    requested_by_principal_id = Column(String, ForeignKey("principals.id"))
+    task_id = Column(String, ForeignKey("tasks.id"))
+    failure_summary = Column(String)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index("ix_ci_runs_org_id_github_run_id", "org_id", "github_run_id", unique=True),
+        Index("ix_ci_runs_org_id", "org_id"),
+        Index("ix_ci_runs_status", "status"),
+        Index("ix_ci_runs_conclusion", "conclusion"),
+        Index("ix_ci_runs_task_id", "task_id"),
+    )
+
+
+class CiFailure(Base):
+    """Fingerprinted CI failure for flake budget / triage."""
+
+    __tablename__ = "ci_failures"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    fingerprint = Column(String, nullable=False)
+    owner = Column(String, nullable=False, default="")
+    repo = Column(String, nullable=False, default="")
+    sample_log = Column(String, nullable=False, default="")
+    triage_json = Column(String, nullable=False, default="{}")
+    rerun_count_window = Column(Integer, nullable=False, default=0)
+    window_started_at = Column(DateTime, nullable=False)
+    last_seen_at = Column(DateTime, nullable=False)
+    issue_url = Column(String)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index("ix_ci_failures_org_fingerprint", "org_id", "fingerprint", unique=True),
+        Index("ix_ci_failures_org_id", "org_id"),
+    )
+
+
+class RoleClaim(Base):
+    """A pending DEV/LEAD/ADMIN claim awaiting approval from an existing peer."""
+
+    __tablename__ = "role_claims"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    claimant_principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    requested_population = Column(String, nullable=False)
+    approver_principal_id = Column(String, ForeignKey("principals.id"))
+    nonce = Column(String, nullable=False)
+    status = Column(String, nullable=False, default=RoleClaimStatus.PENDING.value)
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    resolved_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_role_claims_nonce", "nonce", unique=True),
+        Index("ix_role_claims_status_expires_at", "status", "expires_at"),
+        Index("ix_role_claims_org_id", "org_id"),
+        Index("ix_role_claims_claimant_principal_id", "claimant_principal_id"),
+    )
+
+
+class NotificationPreference(Base):
+    """One org-scoped toggle on the dashboard's Settings page. `key` is a
+    stable machine name (e.g. "project_status_changed"); `label` is the
+    human copy shown next to the checkbox — kept in the DB rather than a
+    frontend constant so relabeling doesn't need a deploy."""
+
+    __tablename__ = "notification_preferences"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    key = Column(String, nullable=False)
+    label = Column(String, nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    __table_args__ = (
+        Index("ix_notification_preferences_org_id", "org_id"),
+        Index(
+            "ix_notification_preferences_org_id_key", "org_id", "key", unique=True
+        ),
+    )
+
+
+class Reminder(Base):
+    """Self-hosted reminder/deadline row - no external calendar dependency.
+
+    `kind` distinguishes a general team reminder (registry.set_reminder)
+    from a client-requested deadline (registry.request_deadline). Both are
+    fired the same way, one-shot, by services/reminders.py's clock job:
+    when `due_at` passes, `principal_id` gets a REMINDER_DUE nudge and
+    `status` moves to "fired". A DEADLINE also gets an immediate
+    DEADLINE_REQUESTED nudge at creation time, separate from the due-time
+    firing, so the target hears about it right away, not just when it's due.
+    """
+
+    __tablename__ = "reminders"
+
+    id = Column(String, primary_key=True)
+    org_id = Column(String, ForeignKey("orgs.id"), nullable=False)
+    created_by_principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    principal_id = Column(String, ForeignKey("principals.id"), nullable=False)
+    order_id = Column(String, ForeignKey("orders.id"))
+    kind = Column(String, nullable=False, default=ReminderKind.GENERAL.value)
+    subject = Column(String, nullable=False)
+    note = Column(String, nullable=False, default="")
+    due_at = Column(DateTime, nullable=False)
+    status = Column(String, nullable=False, default=ReminderStatus.PENDING.value)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+    fired_at = Column(DateTime)
+
+    __table_args__ = (
+        Index("ix_reminders_org_id", "org_id"),
+        Index("ix_reminders_principal_id", "principal_id"),
+        Index("ix_reminders_order_id", "order_id"),
+        Index("ix_reminders_status_due_at", "status", "due_at"),
+    )

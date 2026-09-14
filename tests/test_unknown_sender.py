@@ -1,0 +1,150 @@
+"""Unit tests for main.handle_unknown_sender: team code, then client-vs-team, then enroll."""
+
+from datetime import UTC, datetime
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from cerebro.db.models import Base, ChannelBinding, Org, Principal
+from cerebro.ingress.enrollment import CODE_PROMPT, ENROLLMENT_PROMPT
+from cerebro.ingress.principals import resolve_principal
+from cerebro.main import handle_unknown_sender
+
+
+@pytest.fixture
+def db_session():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    yield session
+    session.close()
+
+
+def test_first_message_asks_for_team_code(db_session):
+    reply = handle_unknown_sender(db_session, "telegram", "tg_1", "hi there")
+
+    assert reply == CODE_PROMPT
+    assert db_session.query(Principal).count() == 0
+
+
+def test_second_message_with_code_then_asks_client_vs_team(db_session):
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi there")
+
+    reply = handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+
+    assert reply == ENROLLMENT_PROMPT
+    org = db_session.query(Org).filter(Org.join_code == "ACME1").one()
+    assert org.name == "Team ACME1"
+
+
+def test_implausible_code_reprompts_without_creating_an_org(db_session):
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi there")
+
+    reply = handle_unknown_sender(db_session, "telegram", "tg_1", "uhh what?")
+
+    assert "doesn't look like a team code" in reply.lower()
+    assert db_session.query(Org).count() == 0
+
+
+def test_third_message_with_valid_answer_enrolls(db_session):
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi there")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+
+    reply = handle_unknown_sender(db_session, "telegram", "tg_1", "Jane Doe jane@example.com")
+
+    assert "enrolled as client" in reply.lower()
+    assert "welcome, jane doe" in reply.lower()
+    principal = db_session.query(Principal).one()
+    assert principal.email == "jane@example.com"
+    assert principal.display_name == "Jane Doe"
+    org = db_session.query(Org).filter(Org.join_code == "ACME1").one()
+    assert principal.org_id == org.id
+    binding = db_session.query(ChannelBinding).one()
+    assert binding.principal_id == principal.id
+    assert binding.channel == "telegram"
+
+
+def test_unparseable_usertype_answer_reprompts_without_enrolling(db_session):
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi there")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+
+    reply = handle_unknown_sender(db_session, "telegram", "tg_1", "uhh what?")
+
+    assert "didn't catch that" in reply.lower()
+    assert db_session.query(Principal).count() == 0
+
+
+def test_resolve_principal_works_after_enrollment_completes(db_session):
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi there")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "Jane Doe jane@example.com")
+
+    principal = resolve_principal(db_session, "telegram", "tg_1")
+
+    assert principal is not None
+    assert principal.population.value == "client"
+
+
+def test_dev_claim_lands_at_ops_pending_approval(db_session):
+    """A gated role claim (DEV/LEAD/ADMIN) doesn't take effect until approved."""
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi there")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+
+    reply = handle_unknown_sender(db_session, "telegram", "tg_1", "DEV jane@example.com")
+
+    assert "pending approval" in reply.lower()
+    principal = resolve_principal(db_session, "telegram", "tg_1")
+    assert principal is not None
+    assert principal.population.value == "ops"
+
+
+def test_identity_persists_across_channels_via_matching_email(db_session):
+    """Jane enrolls on Telegram, then messages Discord for the first time - same identity."""
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "Jane Doe jane@example.com")
+    telegram_principal = resolve_principal(db_session, "telegram", "tg_1")
+
+    handle_unknown_sender(db_session, "discord", "dc_1", "hello")
+    handle_unknown_sender(db_session, "discord", "dc_1", "ACME1")
+    handle_unknown_sender(db_session, "discord", "dc_1", "Jane Doe jane@example.com")
+    discord_principal = resolve_principal(db_session, "discord", "dc_1")
+
+    assert telegram_principal.id == discord_principal.id
+    assert db_session.query(Principal).count() == 1
+    assert db_session.query(ChannelBinding).count() == 2
+
+
+def test_two_different_codes_create_two_different_orgs(db_session):
+    """A second sender with a different code lands in a different, new org."""
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "Jane Doe jane@example.com")
+
+    handle_unknown_sender(db_session, "slack", "sl_1", "hi")
+    handle_unknown_sender(db_session, "slack", "sl_1", "OTHERCO")
+    handle_unknown_sender(db_session, "slack", "sl_1", "Bob Doe bob@example.com")
+
+    jane = resolve_principal(db_session, "telegram", "tg_1")
+    bob = resolve_principal(db_session, "slack", "sl_1")
+    assert jane.org_id != bob.org_id
+    assert db_session.query(Org).count() == 2
+
+
+def test_reusing_an_existing_code_joins_the_same_org(db_session):
+    """A second, different sender who types an already-registered code lands
+    in that same org rather than a fresh one."""
+    handle_unknown_sender(db_session, "telegram", "tg_1", "hi")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "ACME1")
+    handle_unknown_sender(db_session, "telegram", "tg_1", "TEAM DEV jane@example.com")
+
+    handle_unknown_sender(db_session, "discord", "dc_2", "hi")
+    handle_unknown_sender(db_session, "discord", "dc_2", "acme1")  # lowercase, same code
+    handle_unknown_sender(db_session, "discord", "dc_2", "Bob Doe bob@example.com")
+
+    jane = resolve_principal(db_session, "telegram", "tg_1")
+    bob = resolve_principal(db_session, "discord", "dc_2")
+    assert jane.org_id == bob.org_id
+    assert db_session.query(Org).count() == 1

@@ -1,0 +1,79 @@
+# Progress and config files (local use only)
+checkpoint
+CHECKPOINT.md
+rules.md
+road.md
+anomaly.md
+ROUTES.md
+WEB_DASHBOARD.md
+DEPLOYMENT_URLS.md
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+/lib/
+/lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Secrets and environment
+.env
+.env.local
+*.pem
+*.key
+
+# cerebro-web (Next.js)
+cerebro-web/node_modules/
+cerebro-web/.next/
+cerebro-web/out/
+cerebro-web/README.md
+
+# Extracted Claude patch drops / guides (local only — do not push)
+cerebro-admin-patch/
+cerebro-web-1/
+*.zip
+**/APPLY_BACKEND_PATCH.md
+**/DEPLOYMENT_GUIDE.md
+
+# Docker
+postgres_data/
+
+.early.coverage
