@@ -24,7 +24,6 @@ _**Walk out of your prison. Work anywhere, because the only time you should be e
 
 **Client site:** https://cerebro-client.vercel.app
 
-**Source:** https://github.com/RohanOnKeys/cerebro
 
 ### Talk to it
 
